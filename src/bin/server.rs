@@ -38,7 +38,7 @@ struct ServerState {
   auth_token: String,
   clients: HashMap<Endpoint, EndpointStatus>,
   handler: NodeHandler<()>,
-  uuids_users: HashMap<Uuid, Endpoint>,
+  uuids_to_endpoints: HashMap<Uuid, Endpoint>,
   stat_users: Stats,
   waiting_users: WaitAnswers,
 }
@@ -51,7 +51,7 @@ impl ServerState {
       handler,
       stat_users: Stats(HashMap::new()),
       waiting_users: WaitAnswers(HashMap::new()),
-      uuids_users: HashMap::new(),
+      uuids_to_endpoints: HashMap::new(),
     }
   }
 
@@ -60,13 +60,18 @@ impl ServerState {
   }
 
   fn unregister(&mut self, endpoint: Endpoint) {
+    if let Some(EndpointStatus::AuthedAsUser(uuid)) = self.clients.get(&endpoint) {
+      self.stat_users.0.remove(uuid);
+      self.waiting_users.0.remove(uuid);
+      self.uuids_to_endpoints.remove(uuid);
+    };
     self.clients.remove(&endpoint);
   }
 
   fn exec_message(&mut self, endpoint: Endpoint, message: Message) {
     match message {
       Message::Stc(_) | Message::Sta(_) => {
-        return println!("Невалидная категория сообщения: эндпоинт({})", endpoint)
+        println!("Невалидная категория сообщения: эндпоинт({})", endpoint)
       }
       Message::Cts(cts_msg) => {
         self.exec_client_message(endpoint, cts_msg);
@@ -106,20 +111,17 @@ impl ServerState {
       hogwarts_guess::AdminToServer::Start => {
         println!("Рассылка начала игры начата");
         for (endpoint, client) in self.clients.iter() {
-          match client {
-            EndpointStatus::AuthedAsUser { .. } => {
-              let msg_uuid = Uuid::new_v4();
-              println!(
-                "  Отправка: эндпоинт({}) & сообщение({})",
-                endpoint, msg_uuid
-              );
-              self.handler.network().send(
-                endpoint.clone(),
-                &bincode::serialize(&Message::Stc(ServerToClient::ExperimentStart(msg_uuid)))
-                  .unwrap(),
-              );
-            }
-            _ => {}
+          if let EndpointStatus::AuthedAsUser { .. } = client {
+            let msg_uuid = Uuid::new_v4();
+            println!(
+              "  Отправка: эндпоинт({}) & сообщение({})",
+              endpoint, msg_uuid
+            );
+            self.handler.network().send(
+              *endpoint,
+              &bincode::serialize(&Message::Stc(ServerToClient::ExperimentStart(msg_uuid)))
+                .unwrap(),
+            );
           }
         }
         println!("Рассылка начала игры закончена")
@@ -147,14 +149,15 @@ impl ServerState {
           "Принят ответ на попытку: эндпоинт({}) & answer({:?}) @ таргет({})",
           endpoint, answer, target
         );
-        if let Some(trg_endpoint) = self.uuids_users.get(&target) {
+        if let Some(trg_endpoint) = self.uuids_to_endpoints.get(&target) {
+          self.waiting_users.0.remove(&target);
           let msg_uuid = Uuid::new_v4();
           println!(
             "Отправка: эндпоинт({}) & сообщение({})",
             trg_endpoint, msg_uuid
           );
           self.handler.network().send(
-            trg_endpoint.clone(),
+            *trg_endpoint,
             &bincode::serialize(&Message::Stc(ServerToClient::Answer(answer, msg_uuid))).unwrap(),
           );
         } else {
@@ -175,7 +178,8 @@ impl ServerState {
         );
         self
           .clients
-          .insert(endpoint.clone(), EndpointStatus::AuthedAsUser(new_uuid));
+          .insert(endpoint, EndpointStatus::AuthedAsUser(new_uuid));
+        self.uuids_to_endpoints.insert(new_uuid, endpoint);
         self.handler.network().send(
           endpoint,
           &bincode::serialize(&Message::Stc(ServerToClient::RegisterUUID(new_uuid))).unwrap(),
@@ -184,7 +188,8 @@ impl ServerState {
       ClientToServer::Guess(guess) => {
         println!("Попытка: эндпоинт({}) & попытка({})", endpoint, guess);
         if let Some(EndpointStatus::AuthedAsUser(uuid)) = self.clients.get(&endpoint) {
-          self.waiting_users.0.insert(uuid.clone(), guess);
+          self.waiting_users.0.insert(*uuid, guess);
+          *self.stat_users.0.entry(*uuid).or_default() += 1;
         } else {
           println!("Не удалось найти юзера");
         }
